@@ -1,6 +1,5 @@
 # UnifiedOS 👑⚙️
 
-![King Chown GIF](https://media.giphy.com/media/3o7btPCcdNniyf0ArS/giphy.gif)
 
 ## One Platform to Rule Them All 🏰💻
 
