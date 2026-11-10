@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+ureq = { version = "3", features = ["json"] }
+uos-agent = { path = "crates/uos-agent" }
+uos-hw = { path = "crates/uos-hw" }
+uos-llm = { path = "crates/uos-llm" }
+uos-vm = { path = "crates/uos-vm" }

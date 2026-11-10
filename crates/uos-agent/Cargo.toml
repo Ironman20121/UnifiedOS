@@ -1,0 +1,13 @@
+[package]
+name = "uos-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uos-hw.workspace = true
+uos-llm.workspace = true
+uos-vm.workspace = true
