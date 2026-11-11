@@ -8,6 +8,10 @@
 # shows what is printed there after UOS_START. The second serial port is the
 # kernel console and carries the exit code. The application cannot open it,
 # so it cannot forge its own result.
+#
+# With uos.gui=1 on the kernel command line the application runs inside cage,
+# a compositor that shows exactly one application full-screen on the VM's
+# display. The host presents that display as a single window.
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
 export HOME=/home/app USER=app TERM=linux XDG_RUNTIME_DIR=/tmp
@@ -18,6 +22,9 @@ APP_PORT=/dev/ttyS0
 CONTROL_PORT=/dev/ttyS1
 APP_USER=app
 SETUP_FAILED=125
+SEAT_SOCKET=/run/seatd.sock
+SEAT_WAIT_TENTHS=50
+COMPOSITOR_LOG=/run/compositor.log
 
 finish() {
     printf 'UOS_EXIT=%d\n' "$1" >"$CONTROL_PORT"
@@ -36,6 +43,9 @@ mount -t sysfs sysfs /sys
 mountpoint -q /dev || mount -t devtmpfs devtmpfs /dev
 mount -t tmpfs tmpfs /tmp
 mount -t tmpfs tmpfs /run
+mkdir -p /dev/pts /dev/shm
+mount -t devpts devpts /dev/pts
+mount -t tmpfs -o mode=1777 tmpfs /dev/shm
 chmod 600 "$CONTROL_PORT" /dev/console
 # Pass application output through byte for byte.
 stty -F "$APP_PORT" -onlcr -echo
@@ -56,8 +66,49 @@ done
 mapfile -t argv <<<"$decoded"
 [ -n "${argv[0]}" ] || fail "no command was given"
 
+# Brings up what a compositor needs: device discovery, a seat that hands the
+# display and input devices to the unprivileged account, and a runtime
+# directory for its sockets.
+start_graphics() {
+    /usr/lib/systemd/systemd-udevd --daemon || fail "could not start device discovery"
+    udevadm trigger --action=add
+    udevadm settle --timeout=10
+    ls /dev/dri/card* >/dev/null 2>&1 || fail "the VM has no display device"
+
+    seatd -g "$APP_USER" >/dev/null 2>&1 &
+    for ((i = 0; i < SEAT_WAIT_TENTHS; i++)); do
+        [ -S "$SEAT_SOCKET" ] && break
+        sleep 0.1
+    done
+    [ -S "$SEAT_SOCKET" ] || fail "could not start the seat service"
+
+    export XDG_RUNTIME_DIR=/run/app
+    mkdir -m 700 "$XDG_RUNTIME_DIR"
+    chown "$APP_USER:$APP_USER" "$XDG_RUNTIME_DIR"
+    # Software rendering: the VM's display has no 3D acceleration.
+    export LIBSEAT_BACKEND=seatd WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1
+}
+
+run_as_app() {
+    setpriv --reuid="$APP_USER" --regid="$APP_USER" --init-groups --no-new-privs \
+        --bounding-set=-all -- "$@"
+}
+
 cd /app || fail "could not enter the application directory"
+
+if grep -qw 'uos.gui=1' /proc/cmdline; then
+    start_graphics
+    echo UOS_START >"$APP_PORT"
+    # The compositor is chatty on stderr, so that goes to a log. The
+    # application gets the real error stream back through descriptor 3.
+    run_as_app cage -- sh -c 'exec "$@" 2>&3 3>&-' uos-app "${argv[@]}" \
+        <"$APP_PORT" >"$APP_PORT" 3>"$APP_PORT" 2>"$COMPOSITOR_LOG"
+    code=$?
+    # Prefixed, so nothing in the log can pass for an exit report.
+    [ "$code" -eq 0 ] || tail -n 5 "$COMPOSITOR_LOG" | sed 's/^/compositor: /' >"$CONTROL_PORT"
+    finish "$code"
+fi
+
 echo UOS_START >"$APP_PORT"
-setpriv --reuid="$APP_USER" --regid="$APP_USER" --init-groups --no-new-privs \
-    --bounding-set=-all -- "${argv[@]}" <"$APP_PORT" >"$APP_PORT" 2>&1
+run_as_app "${argv[@]}" <"$APP_PORT" >"$APP_PORT" 2>&1
 finish $?

@@ -20,8 +20,9 @@ esac
 
 # Free space added on top of the files, for the guest to write to.
 readonly SLACK_MIB=256
-# Modules the guest init loads to reach the shared application directory.
-readonly SHARE_MODULE=virtiofs
+# Modules the guest init loads: the shared application directory, the
+# display and the keyboard and pointer.
+readonly GUEST_MODULES=(virtiofs virtio-gpu virtio_input)
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 out=${UOS_IMAGE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/uos/images}
@@ -42,7 +43,9 @@ podman export --output "$work/rootfs.tar" "$container"
 podman rm "$container" >/dev/null
 
 mkdir "$work/modules"
-modprobe --show-depends "$SHARE_MODULE" | awk '$1 == "insmod" { print $2 }' |
+for name in "${GUEST_MODULES[@]}"; do
+    modprobe --show-depends "$name" | awk '$1 == "insmod" { print $2 }'
+done | awk '!seen[$0]++' |
     while read -r module; do
         cp "$module" "$work/modules/"
         basename "$module" >>"$work/modules/order"

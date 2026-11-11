@@ -74,6 +74,20 @@ Each launch starts a fresh QEMU/KVM machine:
   that only the guest's init can open, so an app cannot forge its result.
 - A VM that outlives its time limit, or whose caller goes away, is killed.
 
+### Windowed applications
+
+The desktop is the host's Wayland compositor; development targets Hyprland.
+A graphical application gets a VM with a virtual display, keyboard and
+pointer. Inside the guest, `cage` shows that one application full-screen on
+the virtual display, with Xwayland for X11 programs (which is how Wine draws).
+The host presents the display as a single window, so the compositor tiles,
+moves and closes each application like any native one. Resizing the window
+resizes the application; closing it ends the VM.
+
+Rendering is in software. Passing the guest's Wayland surfaces straight to
+the host compositor (virtio-gpu cross-domain) would remove the extra copy and
+allow several windows per application; that is future work.
+
 Running Windows programs through Wine inside a Linux VM keeps the "every app is
 a VM" rule without needing a Windows licence. A full Windows guest is the
 planned fallback for programs Wine cannot run.
@@ -128,8 +142,7 @@ behind the `ChatBackend` trait without touching the agent.
 
 ## Not built yet
 
-- Graphical apps: forwarding a guest window to the host desktop
-  (virtio-gpu with Wayland forwarding).
+- 3D acceleration, clipboard sharing and several windows per application.
 - Guest networking, with per-app rules.
 - A system knowledge index over configs and logs.
 - Voice input.

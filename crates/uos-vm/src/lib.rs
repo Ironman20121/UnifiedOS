@@ -6,9 +6,9 @@ mod spec;
 
 use std::path::PathBuf;
 
-pub use detect::{detect, detect_bytes, AppKind, Guest};
-pub use launch::{launch, LaunchOutcome, LaunchRequest, Paths};
-pub use spec::{encode_argv, VmSpec, GUEST_APP_DIR};
+pub use detect::{detect, detect_bytes, is_windows_gui, AppKind, Guest};
+pub use launch::{launch, LaunchOutcome, LaunchRequest, Paths, WINDOW_TITLE_PREFIX};
+pub use spec::{encode_argv, Display, VmSpec, GUEST_APP_DIR};
 
 #[derive(Debug, thiserror::Error)]
 pub enum VmError {
@@ -41,6 +41,8 @@ pub enum VmError {
     ShareNotReady(String),
     #[error("the virtual machine stopped without reporting an exit code: {0}")]
     NoExitCode(String),
+    #[error("the application's window was closed before it exited")]
+    WindowClosed,
     #[error("the application was stopped after running for {0} seconds")]
     TimedOut(u64),
     #[error(

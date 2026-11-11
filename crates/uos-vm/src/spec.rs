@@ -11,6 +11,21 @@ const GUEST_INIT: &str = "/usr/local/bin/uos-init";
 /// fixed options.
 const MAX_ENCODED_ARGV: usize = 1800;
 
+const DISPLAY_WIDTH: u32 = 1280;
+const DISPLAY_HEIGHT: u32 = 800;
+
+/// What the application's VM shows on the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Display {
+    /// A text-only application; the VM has no display.
+    None,
+    /// The application's display appears as one window on the host desktop.
+    Window,
+    /// The VM has a display and runs its graphics stack, but nothing is
+    /// shown. For hosts without a desktop, and for tests.
+    Offscreen,
+}
+
 /// Everything needed to start one application's virtual machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VmSpec {
@@ -20,25 +35,33 @@ pub struct VmSpec {
     pub share_socket: PathBuf,
     /// Host file that receives what the guest init writes to its control port.
     pub control_log: PathBuf,
+    /// QMP socket through which the host can inspect a VM that has a display,
+    /// for example to take a picture of what the application shows.
+    pub monitor_socket: PathBuf,
     pub memory_mib: u32,
     pub cpus: u32,
     /// Command line to run inside the guest.
     pub guest_argv: Vec<String>,
+    pub display: Display,
+    /// Title of the host window.
+    pub title: String,
 }
 
 impl VmSpec {
     pub fn qemu_args(&self) -> Result<Vec<String>, VmError> {
         let memory = format!("{}M", self.memory_mib);
+        let gui_flag = match self.display {
+            Display::None => "",
+            Display::Window | Display::Offscreen => " uos.gui=1",
+        };
         let append = format!(
-            "console=ttyS1 root=/dev/vda rw quiet loglevel=0 panic=-1 init={GUEST_INIT} uos.argv={}",
+            "console=ttyS1 root=/dev/vda rw quiet loglevel=0 panic=-1 init={GUEST_INIT}{gui_flag} uos.argv={}",
             encode_argv(&self.guest_argv)?
         );
         let args = [
             "-nodefaults",
             "-no-user-config",
             "-no-reboot",
-            "-display",
-            "none",
             "-machine",
             "q35,accel=kvm",
             "-cpu",
@@ -84,8 +107,40 @@ impl VmSpec {
             "chardev:control",
         ]
         .map(str::to_string)
-        .to_vec();
+        .into_iter()
+        .chain(self.display_args())
+        .collect();
         Ok(args)
+    }
+
+    fn display_args(&self) -> Vec<String> {
+        let backend = match self.display {
+            Display::None => return vec!["-display".into(), "none".into()],
+            Display::Offscreen => "none",
+            // Closing the window ends the VM, like closing any application.
+            Display::Window => "gtk,window-close=on,show-menubar=off,zoom-to-fit=on",
+        };
+        [
+            "-display",
+            backend,
+            "-name",
+            &escape_drive_path(&self.title),
+            "-device",
+            &format!("virtio-gpu-pci,xres={DISPLAY_WIDTH},yres={DISPLAY_HEIGHT}"),
+            "-qmp",
+            &format!(
+                "unix:{},server=on,wait=off",
+                escape_drive_path(&self.monitor_socket.to_string_lossy())
+            ),
+            "-device",
+            "virtio-keyboard-pci",
+            // A tablet reports absolute positions, so the host pointer moves
+            // in and out of the window without being captured.
+            "-device",
+            "virtio-tablet-pci",
+        ]
+        .map(str::to_string)
+        .to_vec()
     }
 }
 
@@ -124,9 +179,12 @@ mod tests {
             image: "/images/linux.ext4".into(),
             share_socket: "/run/uos/fs.sock".into(),
             control_log: "/run/uos/control".into(),
+            monitor_socket: "/run/uos/qmp.sock".into(),
             memory_mib: 512,
             cpus: 2,
             guest_argv: argv.iter().map(|s| s.to_string()).collect(),
+            display: Display::None,
+            title: "hello".into(),
         }
     }
 
@@ -215,6 +273,49 @@ mod tests {
 
         assert!(args.contains(&"-nodefaults".to_string()));
         assert!(!args.iter().any(|a| a.contains("net")));
+    }
+
+    #[test]
+    fn gives_a_text_application_no_display() {
+        let args = spec(&["/app/hello"]).qemu_args().unwrap();
+
+        assert_eq!(value_after(&args, "-display"), "none");
+        assert!(!args.iter().any(|a| a.contains("virtio-gpu")));
+        assert!(!args.contains(&"-qmp".to_string()));
+        assert!(!value_after(&args, "-append").contains("uos.gui"));
+    }
+
+    #[test]
+    fn shows_a_windowed_application_in_a_titled_host_window() {
+        let windowed = VmSpec {
+            display: Display::Window,
+            title: "My App, v2".into(),
+            ..spec(&["/app/hello"])
+        };
+
+        let args = windowed.qemu_args().unwrap();
+
+        assert!(value_after(&args, "-display").starts_with("gtk,"));
+        assert_eq!(value_after(&args, "-name"), "My App,, v2");
+        assert!(args.contains(&"virtio-gpu-pci,xres=1280,yres=800".to_string()));
+        assert!(args.contains(&"virtio-keyboard-pci".to_string()));
+        assert!(args.contains(&"virtio-tablet-pci".to_string()));
+        assert!(value_after(&args, "-append").contains(" uos.gui=1 uos.argv="));
+    }
+
+    #[test]
+    fn runs_the_graphics_stack_without_a_host_window_when_offscreen() {
+        let offscreen = VmSpec {
+            display: Display::Offscreen,
+            ..spec(&["/app/hello"])
+        };
+
+        let args = offscreen.qemu_args().unwrap();
+
+        assert_eq!(value_after(&args, "-display"), "none");
+        assert!(args.iter().any(|a| a.starts_with("virtio-gpu-pci")));
+        assert_eq!(value_after(&args, "-qmp"), "unix:/run/uos/qmp.sock,server=on,wait=off");
+        assert!(value_after(&args, "-append").contains("uos.gui=1"));
     }
 
     #[test]

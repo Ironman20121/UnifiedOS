@@ -1,6 +1,7 @@
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::MetadataExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread::{self, JoinHandle};
@@ -8,7 +9,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 use uos_llm::ToolSpec;
-use uos_vm::{LaunchRequest, Paths};
+use uos_vm::{Display, LaunchRequest, Paths};
 
 use crate::risk::is_sensitive_path;
 use crate::{classify_command, Risk};
@@ -43,14 +44,19 @@ pub trait Tool {
     fn run(&self, args: &Value) -> Result<String, ToolError>;
 }
 
-pub fn default_tools(vm_paths: Paths) -> Vec<Box<dyn Tool>> {
+/// `launcher` is the `uos` executable, used to open windowed applications
+/// that keep running after the agent has answered.
+pub fn default_tools(vm_paths: Paths, launcher: PathBuf) -> Vec<Box<dyn Tool>> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     vec![
         Box::new(RunCommand),
         Box::new(ReadFile),
         Box::new(WriteFile { home }),
         Box::new(HardwareStatus),
-        Box::new(LaunchApp { paths: vm_paths }),
+        Box::new(LaunchApp {
+            paths: vm_paths,
+            launcher,
+        }),
     ]
 }
 
@@ -284,6 +290,24 @@ impl Tool for HardwareStatus {
 
 struct LaunchApp {
     paths: Paths,
+    launcher: PathBuf,
+}
+
+impl LaunchApp {
+    /// The command that opens an application in a window: `uos run --gui`.
+    fn window_command(&self, path: &str, app_args: &[String]) -> Command {
+        let mut command = Command::new(&self.launcher);
+        command
+            .args(["run", "--gui", "--", path])
+            .args(app_args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            // Its own process group, so it outlives this command and is not
+            // interrupted along with it.
+            .process_group(0);
+        command
+    }
 }
 
 impl Tool for LaunchApp {
@@ -291,12 +315,19 @@ impl Tool for LaunchApp {
         ToolSpec {
             name: "launch_app",
             description: "Run a Linux or Windows program file inside its own isolated virtual \
-                          machine and return what it prints. The program can read the other \
-                          files in its folder but cannot change them.",
+                          machine. A text program runs to completion and its output is \
+                          returned. A graphical program opens in a window on the desktop and \
+                          keeps running. The program can read the other files in its folder \
+                          but cannot change them.",
             parameters: object_schema(
                 json!({
                     "path": { "type": "string", "description": "Program file on the host" },
                     "args": { "type": "array", "items": { "type": "string" } },
+                    "window": {
+                        "type": "boolean",
+                        "description": "Open in a window. Needed for graphical Linux \
+                                        programs; graphical Windows programs get one anyway.",
+                    },
                 }),
                 &["path"],
             ),
@@ -322,6 +353,14 @@ impl Tool for LaunchApp {
             Some(value) => serde_json::from_value(value.clone())
                 .map_err(|_| ToolError::BadArgument("args"))?,
         };
+        let declares_gui = uos_vm::detect(Path::new(path)).is_ok_and(|(_, gui)| gui);
+        let wants_window = args.get("window").and_then(Value::as_bool).unwrap_or(declares_gui);
+        if wants_window {
+            self.window_command(path, &app_args)
+                .spawn()
+                .map_err(|e| ToolError::Failed(format!("could not open the window: {e}")))?;
+            return Ok(format!("{path} was opened in its own window and is running."));
+        }
         let request = LaunchRequest {
             app: Path::new(path),
             args: &app_args,
@@ -330,6 +369,7 @@ impl Tool for LaunchApp {
             interactive: false,
             timeout: Some(APP_TIMEOUT),
             writable_share: false,
+            display: Some(Display::None),
         };
         let mut printed = CappedBuffer::default();
         match uos_vm::launch(&request, &self.paths, &mut printed) {
@@ -548,11 +588,59 @@ mod tests {
                 image_dir: "/i".into(),
                 kernel_release: "r".into(),
             },
+            launcher: "/bin/true".into(),
         };
 
         assert_eq!(tool.risk(&json!({ "path": home.join("docs/tool") })), Risk::Modify);
         assert_eq!(tool.risk(&json!({ "path": home.join(".ssh/tool") })), Risk::Privileged);
         assert_eq!(tool.risk(&json!({ "path": "/nonexistent/tool" })), Risk::Privileged);
+    }
+
+    fn window_launcher(launcher: &str) -> LaunchApp {
+        LaunchApp {
+            paths: Paths {
+                kernel: "/k".into(),
+                image_dir: "/nonexistent".into(),
+                kernel_release: "r".into(),
+            },
+            launcher: launcher.into(),
+        }
+    }
+
+    #[test]
+    fn opens_a_windowed_program_through_the_launcher_and_returns_at_once() {
+        let tool = window_launcher("/bin/true");
+
+        let command = tool.window_command("/apps/editor", &["file.txt".to_string()]);
+        let result = tool.run(&json!({ "path": "/bin/ls", "window": true })).unwrap();
+
+        let arguments: Vec<_> = command.get_args().collect();
+        assert_eq!(arguments, ["run", "--gui", "--", "/apps/editor", "file.txt"]);
+        assert!(result.contains("opened in its own window"), "{result}");
+    }
+
+    #[test]
+    fn opens_a_graphical_windows_program_in_a_window_without_being_told() {
+        let home = temp_home("guiexe");
+        let exe = home.join("docs/tool.exe");
+        // "MZ", a PE header at 0x40, and the GUI subsystem value.
+        let mut image = vec![0u8; 0x40 + 94];
+        image[..2].copy_from_slice(b"MZ");
+        image[0x3C] = 0x40;
+        image[0x40..0x44].copy_from_slice(b"PE\0\0");
+        image[0x40 + 92] = 2;
+        fs::write(&exe, image).unwrap();
+
+        let result = window_launcher("/bin/true").run(&json!({ "path": exe })).unwrap();
+
+        assert!(result.contains("opened in its own window"), "{result}");
+    }
+
+    #[test]
+    fn reports_a_launcher_that_cannot_be_started() {
+        let result = window_launcher("/nonexistent/uos").run(&json!({ "path": "/bin/ls", "window": true }));
+
+        assert!(matches!(result, Err(ToolError::Failed(m)) if m.contains("could not open the window")));
     }
 
     #[test]
@@ -563,7 +651,8 @@ mod tests {
             kernel_release: "r".into(),
         };
 
-        let mut names: Vec<_> = default_tools(paths).iter().map(|t| t.spec().name).collect();
+        let tools = default_tools(paths, "/bin/true".into());
+        let mut names: Vec<_> = tools.iter().map(|t| t.spec().name).collect();
         names.sort_unstable();
 
         assert_eq!(
@@ -580,6 +669,7 @@ mod tests {
                 image_dir: "/nonexistent".into(),
                 kernel_release: "r".into(),
             },
+            launcher: "/bin/true".into(),
         };
 
         let result = tool.run(&json!({ "path": "/bin/ls" }));

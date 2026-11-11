@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Desktop entry point for the UnifiedOS agent on Hyprland (or any Wayland
+# desktop): asks for a request in a launcher prompt, then runs it in a
+# terminal window so the agent can ask for approval and show its answer.
+#
+# Bind it to a key in the Hyprland config, for example:
+#   hl.bind("SUPER + A", hl.dsp.exec_cmd("/path/to/UnifiedOS/desktop/uos-prompt"))
+#
+# UOS_BIN       the uos executable (default: uos on PATH)
+# UOS_TERMINAL  terminal to show the agent in (default: $TERMINAL, then kitty,
+#               foot, alacritty)
+set -euo pipefail
+
+readonly PROMPT="Ask UnifiedOS"
+readonly WINDOW_TITLE="UnifiedOS agent"
+uos=${UOS_BIN:-uos}
+
+first_available() {
+    local program
+    for program in "$@"; do
+        if [ -n "$program" ] && command -v "$program" >/dev/null 2>&1; then
+            echo "$program"
+            return
+        fi
+    done
+    return 1
+}
+
+notify_and_exit() {
+    notify-send "UnifiedOS" "$1" 2>/dev/null || echo "uos-prompt: $1" >&2
+    exit 1
+}
+
+command -v "$uos" >/dev/null 2>&1 || notify_and_exit "The uos program was not found. Set UOS_BIN."
+menu=$(first_available rofi wofi fuzzel) || notify_and_exit "Install rofi, wofi or fuzzel."
+terminal=$(first_available "${UOS_TERMINAL:-}" "${TERMINAL:-}" kitty foot alacritty) ||
+    notify_and_exit "No terminal found. Set UOS_TERMINAL."
+
+case "$menu" in
+rofi) request=$(rofi -dmenu -p "$PROMPT" -l 0 </dev/null) || exit 0 ;;
+wofi) request=$(wofi --dmenu --prompt "$PROMPT" --lines 1 </dev/null) || exit 0 ;;
+fuzzel) request=$(fuzzel --dmenu --prompt "$PROMPT: " --lines 0 </dev/null) || exit 0 ;;
+esac
+[ -n "$request" ] || exit 0
+
+# The request is passed as an argument, never spliced into the script text.
+session='"$1" ask "$2"; echo; read -n 1 -rsp "Press any key to close"'
+case "$(basename "$terminal")" in
+kitty) exec "$terminal" --title "$WINDOW_TITLE" bash -c "$session" _ "$uos" "$request" ;;
+foot) exec "$terminal" --title "$WINDOW_TITLE" bash -c "$session" _ "$uos" "$request" ;;
+*) exec "$terminal" -e bash -c "$session" _ "$uos" "$request" ;;
+esac

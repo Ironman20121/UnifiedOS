@@ -3,6 +3,13 @@ FROM registry.fedoraproject.org/fedora:44
 
 RUN dnf -y install kmod util-linux && dnf clean all
 
+# Graphics stack for windowed applications: cage shows one application
+# full-screen on the VM's display, Xwayland serves X11 programs (including
+# Wine), seatd and udev give the unprivileged account its display and input.
+RUN dnf -y install cage xorg-x11-server-Xwayland seatd systemd-udev \
+        mesa-dri-drivers dejavu-sans-fonts xterm \
+    && dnf clean all
+
 # Applications run as this unprivileged account, never as root.
 RUN useradd --uid 1000 --create-home app
 

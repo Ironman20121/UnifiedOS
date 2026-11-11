@@ -8,9 +8,12 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::{detect, AppKind, Guest, VmError, VmSpec, GUEST_APP_DIR};
+use crate::{detect, AppKind, Display, Guest, VmError, VmSpec, GUEST_APP_DIR};
 
 const QEMU: &str = "qemu-system-x86_64";
+/// Starts the title of every application window, so desktop rules can tell
+/// them from other QEMU machines (QEMU fixes the window class itself).
+pub const WINDOW_TITLE_PREFIX: &str = "UnifiedOS: ";
 const VIRTIOFSD: &str = "virtiofsd";
 /// virtiofsd is not on PATH on most distributions.
 const VIRTIOFSD_LOCATIONS: [&str; 3] = [
@@ -88,6 +91,9 @@ pub struct LaunchRequest<'a> {
     /// Lets the application change files in its own directory. Without it
     /// the directory is shared read-only.
     pub writable_share: bool,
+    /// `None` decides from the file: a window for Windows programs that
+    /// declare themselves graphical, text-only for everything else.
+    pub display: Option<Display>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,7 +113,12 @@ pub fn launch(
         .app
         .canonicalize()
         .map_err(VmError::io(format!("could not find {}", request.app.display())))?;
-    let kind = detect(&app)?;
+    let (kind, declares_gui) = detect(&app)?;
+    let display = request.display.unwrap_or(if declares_gui {
+        Display::Window
+    } else {
+        Display::None
+    });
     let guest = kind.guest();
     let image = paths.image(guest);
     check_image(&image, &paths.kernel_release, guest)?;
@@ -127,9 +138,12 @@ pub fn launch(
         image,
         share_socket,
         control_log: run_dir.path.join("control"),
+        monitor_socket: run_dir.path.join("qmp.sock"),
         memory_mib: request.memory_mib,
         cpus: request.cpus,
         guest_argv: guest_argv(kind, &file_name, request.args),
+        display,
+        title: format!("{WINDOW_TITLE_PREFIX}{file_name}"),
     };
     let exit_code = run_qemu(&spec, request, &run_dir.path, output)?;
     Ok(LaunchOutcome { kind, exit_code })
@@ -226,6 +240,9 @@ fn run_qemu(
     let report = fs::read(&spec.control_log).unwrap_or_default();
     let report = String::from_utf8_lossy(&report);
     parse_exit_report(&report).ok_or_else(|| {
+        if spec.display == Display::Window && status.success() {
+            return VmError::WindowClosed;
+        }
         let log = fs::read_to_string(&log_path).unwrap_or_default();
         let details = [log.trim(), report.trim(), filter.boot_log().trim()]
             .into_iter()

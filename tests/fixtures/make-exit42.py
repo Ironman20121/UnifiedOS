@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Writes exit42.exe: the smallest 64-bit Windows console program that exits with code 42.
+"""Writes the smallest 64-bit Windows program that exits with code 42.
 
 Used to check that a Windows program's exit code travels from Wine, through the
-guest, back to the host. Usage: make-exit42.py OUTPUT
+guest, back to the host. Usage: make-exit42.py OUTPUT [console|gui]
+
+"gui" marks the program as graphical, which is what makes UnifiedOS give it a
+window; the program itself is identical.
 """
 import struct
 import sys
@@ -12,6 +15,8 @@ SECTION_ALIGNMENT = 0x1000
 IMAGE_BASE = 0x140000000
 ENTRY_RVA = 0x1000
 CODE = bytes([0xB8, 42, 0, 0, 0, 0xC3])  # mov eax, 42 ; ret
+SUBSYSTEMS = {"gui": 2, "console": 3}
+subsystem = SUBSYSTEMS[sys.argv[2] if len(sys.argv) > 2 else "console"]
 
 dos_header = b"MZ" + bytes(58) + struct.pack("<I", 0x40)
 coff_header = struct.pack(
@@ -41,7 +46,7 @@ optional_header = struct.pack(
     2 * SECTION_ALIGNMENT,  # image size: headers + one section
     FILE_ALIGNMENT,  # headers size
     0,
-    3,  # console subsystem
+    subsystem,
     0x8100,  # NX-compatible, fixed base
     0x100000, 0x1000,  # stack reserve, commit
     0x100000, 0x1000,  # heap reserve, commit

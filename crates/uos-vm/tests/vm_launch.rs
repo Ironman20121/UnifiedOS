@@ -11,9 +11,11 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use uos_vm::{launch, AppKind, LaunchRequest, Paths, VmError};
+use uos_vm::{launch, AppKind, Display, LaunchRequest, Paths, VmError};
 
 const WINDOWS_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/exit42.exe");
+const WINDOWS_GUI_FIXTURE: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/exit42-gui.exe");
 
 fn run(app: &Path, args: &[String]) -> (AppKind, i32, String) {
     let request = LaunchRequest {
@@ -24,6 +26,7 @@ fn run(app: &Path, args: &[String]) -> (AppKind, i32, String) {
         interactive: false,
         timeout: Some(Duration::from_secs(120)),
         writable_share: false,
+        display: None,
     };
     let mut printed = Vec::new();
     let outcome = launch(&request, &Paths::from_env().unwrap(), &mut printed).unwrap();
@@ -39,6 +42,7 @@ fn request<'a>(app: &'a Path, timeout: Duration, writable_share: bool) -> Launch
         interactive: false,
         timeout: Some(timeout),
         writable_share,
+        display: None,
     }
 }
 
@@ -146,10 +150,45 @@ fn stops_an_application_that_runs_past_its_time_limit() {
 }
 
 #[test]
+#[ignore = "needs KVM and the linux guest image"]
+fn runs_a_graphical_application_on_the_vm_display() {
+    // xterm cannot start without a working display; what it runs leaves the proof.
+    let app = script(
+        "gui",
+        "xterm -e sh -c 'echo \"drawn on $WAYLAND_DISPLAY$DISPLAY\" >/tmp/proof'; cat /tmp/proof; exit 4",
+    );
+    let mut printed = Vec::new();
+    let offscreen = LaunchRequest {
+        display: Some(Display::Offscreen),
+        ..request(&app, Duration::from_secs(120), false)
+    };
+
+    let outcome = launch(&offscreen, &Paths::from_env().unwrap(), &mut printed).unwrap();
+
+    assert_eq!(String::from_utf8_lossy(&printed), "drawn on wayland-0:0\n");
+    assert_eq!(outcome.exit_code, 4);
+}
+
+#[test]
 #[ignore = "needs KVM and the windows guest image"]
 fn runs_a_windows_program_and_returns_its_exit_code() {
     let (kind, code, _) = run(Path::new(WINDOWS_FIXTURE), &[]);
 
     assert_eq!(kind, AppKind::WindowsPe);
     assert_eq!(code, 42);
+}
+
+#[test]
+#[ignore = "needs KVM and the windows guest image"]
+fn runs_a_graphical_windows_program_on_the_vm_display() {
+    let mut printed = Vec::new();
+    let offscreen = LaunchRequest {
+        display: Some(Display::Offscreen),
+        ..request(Path::new(WINDOWS_GUI_FIXTURE), Duration::from_secs(120), false)
+    };
+
+    let outcome = launch(&offscreen, &Paths::from_env().unwrap(), &mut printed).unwrap();
+
+    assert_eq!(outcome.kind, AppKind::WindowsPe);
+    assert_eq!(outcome.exit_code, 42);
 }

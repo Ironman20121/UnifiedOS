@@ -13,7 +13,7 @@ use serde_json::Value;
 use uos_agent::{default_tools, Agent, AgentConfig, Approver, AuditLog, Policy, Risk};
 use uos_hw::{HardwareSnapshot, ModelProfile, PlanOptions, Reserve, TierPlan};
 use uos_llm::{Ollama, DEFAULT_BASE_URL};
-use uos_vm::{LaunchRequest, Paths};
+use uos_vm::{Display, LaunchRequest, Paths, VmError};
 
 const DEFAULT_MODEL: &str = "qwen2.5-coder:32b-instruct";
 const MAX_AGENT_STEPS: usize = 12;
@@ -73,6 +73,13 @@ enum Cmd {
         /// Stop the program after this many seconds.
         #[arg(long)]
         timeout: Option<u64>,
+        /// Show the program in a window. Windows programs that declare
+        /// themselves graphical get one without this flag.
+        #[arg(long, conflicts_with = "no_gui")]
+        gui: bool,
+        /// Never open a window, even for a graphical Windows program.
+        #[arg(long)]
+        no_gui: bool,
     },
 }
 
@@ -111,7 +118,8 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 },
             };
             let audit = AuditLog::new(AuditLog::default_path());
-            let tools = default_tools(Paths::from_env()?);
+            let launcher = std::env::current_exe().context("could not locate the uos executable")?;
+            let tools = default_tools(Paths::from_env()?, launcher);
             let agent = Agent::new(&ollama, &TerminalApprover, tools, audit, config);
             println!("{}", agent.run(&request.join(" "))?);
             Ok(ExitCode::SUCCESS)
@@ -123,7 +131,14 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             cpus,
             writable,
             timeout,
+            gui,
+            no_gui,
         } => {
+            let display = match (gui, no_gui) {
+                (true, _) => Some(Display::Window),
+                (_, true) => Some(Display::None),
+                (false, false) => None,
+            };
             let request = LaunchRequest {
                 app: &app,
                 args: &args,
@@ -132,10 +147,17 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 interactive: true,
                 timeout: timeout.map(Duration::from_secs),
                 writable_share: writable,
+                display,
             };
-            let outcome = uos_vm::launch(&request, &Paths::from_env()?, &mut io::stdout())?;
-            // Exit statuses are a single byte; anything else reads as failure.
-            Ok(u8::try_from(outcome.exit_code).map_or(ExitCode::FAILURE, ExitCode::from))
+            match uos_vm::launch(&request, &Paths::from_env()?, &mut io::stdout()) {
+                // Exit statuses are a single byte; anything else reads as failure.
+                Ok(outcome) => {
+                    Ok(u8::try_from(outcome.exit_code).map_or(ExitCode::FAILURE, ExitCode::from))
+                }
+                // Closing the window is an ordinary way to quit.
+                Err(VmError::WindowClosed) => Ok(ExitCode::SUCCESS),
+                Err(error) => Err(error.into()),
+            }
         }
     }
 }

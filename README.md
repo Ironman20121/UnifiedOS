@@ -30,17 +30,22 @@ The design is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 Working today, on a Linux host with KVM:
 
 - `uos run <file>` boots a fresh VM in about a second and runs a Linux
-  program, a script, or a Windows console `.exe` (through Wine) inside it. The
+  program, a script, or a Windows `.exe` (through Wine) inside it. The
   program runs without root, sees only its own folder (read-only unless you
   pass `--writable`), has no network, and its VM is discarded on exit.
+- Graphical programs open as one window per app on the host desktop
+  (developed on Hyprland). Windows programs that declare themselves graphical
+  get a window automatically; for Linux programs pass `--gui`.
 - `uos ask "<request>"` hands a plain-language request to a local model that
   inspects and changes the system through tools. Read-only commands run
   directly; everything else asks for approval, and every action is written to
   an audit log.
 - `uos hw` shows how the model is split across GPU, RAM and disk.
 
-Not built yet: graphical apps, guest networking, installers (`.deb`, `.msi`),
-a system knowledge index, voice input, macOS apps and a bootable image.
+Not built yet: 3D acceleration and clipboard sharing for windowed apps, guest
+networking, installers (`.deb`, `.msi`), a system knowledge index, voice input,
+macOS apps and a bootable image. A Linux program also needs the libraries it
+links against to exist in the guest image.
 
 ## ⚡ Quick start
 
@@ -54,6 +59,7 @@ guest/build-image.sh windows    # guest image for Windows apps (downloads Wine)
 
 target/release/uos run /path/to/program --its-args
 target/release/uos run /path/to/program.exe
+target/release/uos run --gui /path/to/graphical-program
 target/release/uos ask "which process is using the most memory?"
 target/release/uos hw
 ```
@@ -62,6 +68,16 @@ The model defaults to `qwen2.5-coder:32b-instruct` (`ollama pull` it first);
 choose another with `--model` or `UOS_MODEL`. Smaller models were unreliable at
 calling tools in testing. Guest images carry modules for the running kernel, so rebuild
 them after a kernel update.
+
+To ask the agent from the desktop, bind [desktop/uos-prompt](desktop/uos-prompt)
+to a key. On Hyprland:
+
+```lua
+hl.bind("SUPER + A", hl.dsp.exec_cmd("/path/to/UnifiedOS/desktop/uos-prompt"))
+```
+
+App windows are titled `QEMU (UnifiedOS: <program>)`, which window rules can
+match.
 
 Tests: `cargo test --workspace`. The end-to-end VM tests need the images:
 `cargo test -p uos-vm --test vm_launch -- --ignored`.
