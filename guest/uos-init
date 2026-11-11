@@ -1,0 +1,63 @@
+#!/bin/bash
+# PID 1 inside every UnifiedOS application VM.
+#
+# Mounts the application's directory at /app and runs the command passed on
+# the kernel command line as the unprivileged "app" account.
+#
+# The first serial port carries the application's input and output; the host
+# shows what is printed there after UOS_START. The second serial port is the
+# kernel console and carries the exit code. The application cannot open it,
+# so it cannot forge its own result.
+
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+export HOME=/home/app USER=app TERM=linux XDG_RUNTIME_DIR=/tmp
+export WINEPREFIX=/home/app/.wine WINEDEBUG=-all WINEDLLOVERRIDES=mscoree,mshtml=
+
+MODULE_DIR=/lib/uos-modules
+APP_PORT=/dev/ttyS0
+CONTROL_PORT=/dev/ttyS1
+APP_USER=app
+SETUP_FAILED=125
+
+finish() {
+    printf 'UOS_EXIT=%d\n' "$1" >"$CONTROL_PORT"
+    sync
+    echo o >/proc/sysrq-trigger
+    sleep 60
+}
+
+fail() {
+    printf 'UOS_START\nuos-init: %s\n' "$*" >"$APP_PORT"
+    finish "$SETUP_FAILED"
+}
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mountpoint -q /dev || mount -t devtmpfs devtmpfs /dev
+mount -t tmpfs tmpfs /tmp
+mount -t tmpfs tmpfs /run
+chmod 600 "$CONTROL_PORT" /dev/console
+# Pass application output through byte for byte.
+stty -F "$APP_PORT" -onlcr -echo
+
+while read -r module; do
+    insmod "$MODULE_DIR/$module" || fail "could not load kernel module $module"
+done <"$MODULE_DIR/order"
+
+mount -t virtiofs app /app || fail "could not mount the application directory"
+
+# The command arrives hex-encoded, one argument per line.
+hex=$(tr ' ' '\n' </proc/cmdline | sed -n 's/^uos\.argv=//p')
+decoded=
+for ((i = 0; i < ${#hex}; i += 2)); do
+    printf -v byte '%b' "\\x${hex:i:2}"
+    decoded+=$byte
+done
+mapfile -t argv <<<"$decoded"
+[ -n "${argv[0]}" ] || fail "no command was given"
+
+cd /app || fail "could not enter the application directory"
+echo UOS_START >"$APP_PORT"
+setpriv --reuid="$APP_USER" --regid="$APP_USER" --init-groups --no-new-privs \
+    --bounding-set=-all -- "${argv[@]}" <"$APP_PORT" >"$APP_PORT" 2>&1
+finish $?

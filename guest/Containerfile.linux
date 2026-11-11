@@ -1,0 +1,9 @@
+# Root filesystem for Linux application VMs.
+FROM registry.fedoraproject.org/fedora:44
+
+RUN dnf -y install kmod util-linux && dnf clean all
+
+# Applications run as this unprivileged account, never as root.
+RUN useradd --uid 1000 --create-home app
+
+COPY --chmod=0755 uos-init /usr/local/bin/uos-init

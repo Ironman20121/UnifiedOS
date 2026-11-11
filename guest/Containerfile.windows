@@ -1,0 +1,14 @@
+# Root filesystem for Windows application VMs: the Linux guest plus Wine.
+FROM localhost/uos-guest-linux
+
+RUN dnf -y install wine-core && dnf clean all
+
+# Create the Wine prefix once here; VM disks are throwaway, so an app would
+# otherwise wait for it on every launch. Mono and Gecko are skipped: their
+# installers ask questions.
+USER app
+ENV WINEPREFIX=/home/app/.wine WINEDEBUG=-all WINEDLLOVERRIDES=mscoree,mshtml= \
+    XDG_RUNTIME_DIR=/tmp
+COPY --chmod=0755 create-wine-prefix /usr/local/bin/create-wine-prefix
+RUN create-wine-prefix
+USER root

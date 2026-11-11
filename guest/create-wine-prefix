@@ -1,0 +1,33 @@
+#!/bin/bash
+# Creates the Wine prefix at $WINEPREFIX during the image build.
+#
+# Without a display `wineboot --init` writes a complete prefix and then waits
+# forever, so this watches for the registry files and stops Wine once they
+# are there.
+set -euo pipefail
+
+readonly TIMEOUT_SECS=300
+readonly REGISTRY_FILES=(system.reg user.reg userdef.reg .update-timestamp)
+
+prefix_is_complete() {
+    local file
+    for file in "${REGISTRY_FILES[@]}"; do
+        [ -s "$WINEPREFIX/$file" ] || return 1
+    done
+}
+
+wine wineboot --init >/dev/null 2>&1 &
+
+for ((waited = 0; waited < TIMEOUT_SECS; waited++)); do
+    if prefix_is_complete; then
+        # Let Wine finish flushing the registry before it is stopped.
+        sleep 5
+        wineserver -k || true
+        exit 0
+    fi
+    sleep 1
+done
+
+wineserver -k || true
+echo "create-wine-prefix: the prefix was not complete after ${TIMEOUT_SECS}s" >&2
+exit 1

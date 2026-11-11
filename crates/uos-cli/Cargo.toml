@@ -1,0 +1,18 @@
+[package]
+name = "uos-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "uos"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+uos-agent.workspace = true
+uos-hw.workspace = true
+uos-llm.workspace = true
+uos-vm.workspace = true
